@@ -1,0 +1,43 @@
+{
+	"paths": {
+		"spice": "generic_spice.spi",
+		"liberty": "generic_synthesis.lib",
+		"includes": [
+			"generic_spice_model.spi"
+		]
+	},
+	"testbench": {
+		"supply-name-vdd": "VDD",
+		"supply-name-vss": "VSS",
+		"supply-voltage": 1.8e0,
+		"supply-series-resistance": 1e0,
+		"supply-parasitic-capacitance": 1e-15,
+		"input-voltage-high": 1.8e0,
+		"input-voltage-low": 0.0e0,
+		"input-series-resistance": 5e0,
+		"input-parasitic-capacitance": 1e-15,
+		"output-series-resistance": 5e0,
+		"output-parasitic-capacitance": 1e-15,
+		"output-leakage-resistor": 100e3,
+		"load-capacitance": 1e-12,
+		"input-setup-time": 1e-9,
+		"input-transition-time": 1e-12,
+		"propagation-delay-factor": 1.0,
+		"propagation-constraint-factor": 1.0,
+		"output-transition-factor": 1.0,
+		"delta-measurement": 25e-9,
+		"simulation-step": 1e-12,
+		"simulation-gmin": 5e-9
+	},
+	"measurement": {
+		"measurement-low-boundary": 0.45e0,
+		"measurement-high-boundary": 1.35e0
+	},
+	"fault": {
+		"stuck-resistor-value": 1e-1,
+		"open-resistor-value": 1e9,
+		"short-resistor-value": 1e0,
+		"t-leak-resistor-value": 1e0,
+		"t-drive-resistor-value": 10e3
+	}
+}
