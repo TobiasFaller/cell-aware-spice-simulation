@@ -17,12 +17,11 @@ class DebugOptions(StrEnum):
 def _ExtractPinsFromEquation(equation: str, states: List[str]) -> Iterable[str]:
 	equation = NormalizeEquation(equation)
 	for name in equation.split(' '):
-		name = name.strip()
+		name = name.replace('~', '').strip()
 		if name != '' and name not in states and name not in ['0', '1']:
 			yield name
 
 if __name__ == '__main__':
-
 	parser = argparse.ArgumentParser(
 		prog='UtilityLibertyToMeta',
 		description='Exports meta data in JSON format about the liberty library',
@@ -95,6 +94,7 @@ if __name__ == '__main__':
 			**({'sequential': True} if sequential else {}),
 			**({'latch': True} if latch else {}),
 			**({'flipflop': True} if flipflop else {}),
+			'equations': cell.equations
 		}
 
 	with open(options.output_path, 'wt', encoding='utf-8') as stream:

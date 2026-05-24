@@ -25,7 +25,7 @@ def ExpandClocks(inputs: Dict[str, str], clocks: Dict[str, str], clockPolarities
 	>>> ExpandClocks({'I': '01X'}, {'C': 'PPP'}, {'C': 'positive'})
 	([0, 0, 0, 1, 1, 1, 2, 2, 2], {'I': '000111XXX'}, {'C': '010010010'})
 	"""
-	numberTimeframes = max([len(values) for values in inputs.values()])
+	numberTimeframes = max([0] + [len(values) for values in inputs.values()])
 	if len(clocks) == 0:
 		return list(range(numberTimeframes)), inputs, clocks
 
@@ -55,7 +55,7 @@ def CompactClocks(inputs: Dict[str, str], clocks: Dict[str, str], clockPolaritie
 	>>> CompactClocks({'I': '000111XXX'}, {'C': '010010010'}, {'C': 'positive'}, {'O': 'XX000111X'})
 	([0, 3, 6], {'I': '01X'}, {'C': 'PPP'}, {'O': 'X01'})
 	"""
-	numberTimeframes = max([len(values) for values in inputs.values()])
+	numberTimeframes = max([0] + [len(values) for values in inputs.values()])
 	if len(clocks) == 0:
 		return list(range(numberTimeframes)), inputs, clocks, outputs
 

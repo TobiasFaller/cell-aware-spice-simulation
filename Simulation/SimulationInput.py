@@ -13,6 +13,8 @@ def GetStaticBinaryPatterns(inputs) -> List[Dict[str, str]]:
 	[{'A': '0', 'B': '0'}, {'A': '0', 'B': '1'}, {'A': '1', 'B': '0'}, {'A': '1', 'B': '1'}]
 	"""
 	input_count = len(inputs)
+	if input_count == 0:
+		return [{}]
 
 	patterns = []
 	for input in range(0, 2**input_count):
@@ -33,6 +35,9 @@ def GetStaticGrayPatterns(inputs) -> List[Dict[str, str]]:
 	[{'A': '0', 'B': '0'}, {'A': '0', 'B': '1'}, {'A': '1', 'B': '1'}, {'A': '1', 'B': '0'}]
 	"""
 	input_count = len(inputs)
+	if input_count == 0:
+		return [{}]
+
 	gray_code = GrayCode(input_count)
 	gray_list = list(gray_code.generate_gray())
 
@@ -67,6 +72,8 @@ def GetDynamicTransitionPatterns(inputs) -> List[Dict[str, str]]:
 	 {'A': '11', 'B': '11', 'C': '10'}]
 	"""
 	input_count = len(inputs)
+	if input_count == 0:
+		return [{}]
 
 	active_transition = ["01", "10"]
 	sequence_result = []

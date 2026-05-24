@@ -1,15 +1,14 @@
-import re
-
 from liberty.parser import parse_liberty, EscapedString
 from typing import Dict, List, Tuple
 from pathlib import Path
 from logging import warning
+from collections.abc import Callable
 
 from Logic.Logic import EvaluateEquation, NormalizeEquation
 from Spice.SpiceModelInfo import SpiceModelInfo
 from Simulation.SimulationInput import GetStaticBinaryPatterns
 
-def ImportLibertyCells(path: Path) -> Dict[str, SpiceModelInfo]:
+def ImportLibertyCells(path: Path, cellFilter: Callable[[str], bool] = None) -> Dict[str, SpiceModelInfo]:
 	def _GetValue(name):
 		return name.value if isinstance(name, EscapedString) else name
 
@@ -19,6 +18,13 @@ def ImportLibertyCells(path: Path) -> Dict[str, SpiceModelInfo]:
 	cells = {}
 	for cell in library.get_groups('cell'):
 		cellName = _GetValue(cell.args[0])
+		if cellFilter is not None and not cellFilter(cellName):
+			continue
+
+		if len(cell.get_groups('statetable')) > 0:
+			warning(f'Cell {cellName} uses state tables and will be ignored. State tables are currently not supported.')
+			continue
+
 		cellAttributes = {
 			'ff_state_internal': [],
 			'ff_state_positive': [],
@@ -34,10 +40,6 @@ def ImportLibertyCells(path: Path) -> Dict[str, SpiceModelInfo]:
 			'latch_set': [],
 			'latch_reset': [],
 		}
-
-		if len(cell.get_groups('statetable')) > 0:
-			warning(f'Cell {cellName} uses state tables and will be ignored. State tables are currently not supported.')
-			continue
 
 		inputPins = []
 		outputPins = []

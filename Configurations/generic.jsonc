@@ -20,14 +20,15 @@
 		"output-parasitic-capacitance": 1e-15,
 		"output-leakage-resistor": 100e3,
 		"load-capacitance": 1e-12,
-		"input-setup-time": 1e-9,
+		"input-setup-time": 0e-9,
 		"input-transition-time": 1e-12,
-		"propagation-delay-factor": 1.0,
-		"propagation-constraint-factor": 1.0,
-		"output-transition-factor": 1.0,
 		"delta-measurement": 25e-9,
 		"simulation-step": 1e-12,
-		"simulation-gmin": 5e-9
+		"simulation-gmin": 5e-9,
+		"cell-delay-factor": 1.0,
+		"transition-delay-factor": 1.0,
+		"propagation-delay-factor": 1.0,
+		"constraint-factor": 1.0
 	},
 	"measurement": {
 		"measurement-low-boundary": 0.45e0,

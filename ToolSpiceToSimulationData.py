@@ -4,12 +4,11 @@ import json
 import json5
 import re
 import tqdm
-import itertools
 import gzip
 from pathlib import Path
 from logging import debug, info, warning, error
 from dataclasses import dataclass
-from typing import List, Dict, Callable, Any, Union, Tuple
+from typing import List, Dict, Callable, Any, Union
 from collections import defaultdict
 from enum import StrEnum
 from bisect import bisect_left, bisect_right
@@ -18,9 +17,9 @@ from PySpice.Unit import u_s, u_Ω, u_F, u_V, u_S
 from PySpice.Unit.Unit import UnitValue
 
 from Logging.Logging import ParseOptions, ParseEnumList
-from Liberty.TimingImporter import CellTimingInfo, ImportLibertyTiming, GetPortTimingInfo
+from Liberty.TimingImporter import CellTimingInfo, LookupInfo, ImportLibertyTiming, GetTimingConstraints, GetLookupConstraints
 from Liberty.CellImporter import ImportLibertyCells
-from Logic.Pattern import GetPatternTransitions, ConvertPatternsToFilteredSequence, ExpandClocks, CompactClocks
+from Logic.Pattern import ConvertPatternsToFilteredSequence, ExpandClocks, CompactClocks
 from Logic.Logic import EvaluateEquations
 from Spice.SpiceFaultInjector import FaultType, FaultInjection, PlanFaultInjections, InjectFault
 from Spice.SpiceModelInfo import SpiceModelInfo
@@ -123,7 +122,7 @@ def Main() -> None:
 	outputPath = Path(options.output_path)
 	outputPath.mkdir(parents=True, exist_ok=True)
 
-	info('------------------------ LOADING CELL INFO -----------------------')
+	info('------------------------ LOADING CONFIGURATION -----------------------')
 	global library
 	with open(options.library, 'rt', encoding='utf-8') as file:
 		library = json5.load(file)
@@ -138,27 +137,33 @@ def Main() -> None:
 	includePaths = [libraryPath / path for path in library['paths']['includes']]
 
 	info('------------------------ LOADING CELLS -----------------------')
-	cells = ImportLibertyCells(libertyPath)
-	for cellName, cell in cells.items():
-		inputs = f'Inputs {", ".join(cell.inputs)}' if len(cell.inputs) > 0 else ''
-		outputs = f'Outputs {", ".join(cell.outputs)}' if len(cell.outputs) > 0 else ''
-		clocks = f'Clocks {", ".join(cell.clocks)}' if len(cell.clocks) > 0 else ''
-		# supplies = f'Supplies {", ".join(cell.supplies)}' if len(cell.supplies) > 0 else ''
-		# grounds = f'Grounds {", ".join(cell.grounds)}' if len(cell.grounds) > 0 else ''
-		equations = f'Equations {", ".join(["{}={}".format(output, equation) for output, equation in cell.equations.items()])}' if len(cell.equations) > 0 else ''
-		debug(f'Found cell {cellName} ({", ".join([element for element in (inputs, outputs, clocks, equations) if element])})')
-
+	cellFilter = lambda name: re.match(options.cell_filter, name)
+	cells = ImportLibertyCells(libertyPath, cellFilter)
 	cellInfos: Dict[str, SpiceModelInfo] = {}
 	for cellInfo in cells.values():
-		if not re.match(options.cell_filter, cellInfo.name):
-			continue
-
 		path = spicePath.with_name(spicePath.name.replace('{cell}', cellInfo.name))
 		cellInfo.cell = ParseSpiceCell(path, cellInfo.name)
 		cellInfos[cellInfo.name] = cellInfo
 
+	for cellName, cell in cells.items():
+		def _GetClock(clock, pol):
+			return {
+				None: f'?{clock}',
+				'positive': f'+{clock}',
+				'negative': f'-{clock}',
+			}.get(pol)
+
+		inputs = f'Inputs {", ".join(cell.inputs)}' if len(cell.inputs) > 0 else ''
+		outputs = f'Outputs {", ".join(cell.outputs)}' if len(cell.outputs) > 0 else ''
+		clocks = f'Clocks {", ".join([_GetClock(clock, pol) for clock, pol in zip(cell.clocks, cell.clockPolarities)])}' if len(cell.clocks) > 0 else ''
+		# supplies = f'Supplies {", ".join(cell.supplies)}' if len(cell.supplies) > 0 else ''
+		# grounds = f'Grounds {", ".join(cell.grounds)}' if len(cell.grounds) > 0 else ''
+		equations = f'Equations {", ".join(["{}={}".format(output, equation) for output, equation in cell.equations.items()])}' if len(cell.equations) > 0 else ''
+		debug(f'Loaded cell {cellName} ({", ".join([element for element in (inputs, outputs, clocks, equations) if element])})')
+
 	info('------------------------ LOADING TIMING TABLES -----------------------')
-	cellTimings: Dict[str, CellTimingInfo] = ImportLibertyTiming(libertyPath)
+	cellFilter = lambda name: name in cellInfos
+	cellTimings: Dict[str, CellTimingInfo] = ImportLibertyTiming(libertyPath, cellFilter)
 
 	info('------------------------ PLANNING SIMULATIONS -----------------------')
 	simulationData = SimulationCategory()
@@ -171,6 +176,22 @@ def Main() -> None:
 		if cellTiming is None:
 			raise ValueError(f'No timing information is available for cell {cell}')
 
+		def _CheckLimits(value: UnitValue, constraints: LookupInfo, name: str):
+			if value < constraints.minValue:
+				raise ValueError(f'Parameter {name} for cell {cellInfo.name} with {value} is below minimum {constraints.minValue}')
+			elif value > constraints.maxValue:
+				raise ValueError(f'Parameter {name} for cell {cellInfo.name} with {value} is above maximum {constraints.maxValue}')
+
+		# Adjust input transition and load capacitance if required as not all gates have a range
+		# where the default input transition and load capacitance falls into.
+		lookupConstraints = GetLookupConstraints(cellTiming)
+		testbenchParams = GetTestbenchOverrides(library.get('testbench', {})) \
+			| GetTestbenchOverrides(library.get('overrides', {}).get(cellInfo.name, {}))
+		if 'total_output_net_capacitance' in lookupConstraints:
+			_CheckLimits(testbenchParams['LOAD_CAPACITANCE'], lookupConstraints['total_output_net_capacitance'], 'load capacitance')
+		if 'input_net_transition' in lookupConstraints:
+			_CheckLimits(testbenchParams['INPUT_TRANSITION_TIME'], lookupConstraints['input_net_transition'], 'input transition')
+
 		cellSimulations: Dict[Union[FaultType, str], List[SimulationJob]] = defaultdict(list)
 		for inputType in inputTypes:
 			if inputType == InputType.STATIC_INPUTS:
@@ -182,7 +203,7 @@ def Main() -> None:
 				if len(cellInfo.clocks) > 0:
 					# Extend all the inputs with another timeframe such that the output can be .
 					# The value of the inputs is keps as in the time before to have a deterministic behaviour.
-					inputLength = len(list(inputSequence.values())[0])
+					inputLength = max([0] + [len(value) for value in inputSequence.values()])
 					inputSequence = { input: f'{value}{value[-1]}' for input, value in inputSequence.items() }
 					clockSequence = { clock: f'{"P" * inputLength}P' for clock in cellInfo.clocks }
 				else:
@@ -379,7 +400,7 @@ def ProcessFaultSimulations(function: Callable, jobs: List[SimulationJob]) -> Li
 			info('(Re)creating pool and (re)allocating workers')
 			with multiprocessing.Pool(processes, maxtasksperchild=1, initializer=InitGlobals, initargs=(GetGlobals(), )) as pool:
 				with tqdm.tqdm(total=len(jobs), initial=len(result)) as progressBar:
-					for item in pool.imap_unordered(function, sublist, chunksize=100):
+					for item in pool.imap_unordered(function, sublist, chunksize=100 if len(jobs) > 10000 else 1):
 						progressBar.update(1)
 						result += [item]
 	else:
@@ -404,7 +425,7 @@ def RunFaultSimulationJob(job: SimulationJob) -> SimulationResult:
 		outputs = { output: equationResults[output] for output in job.cellInfo.outputs }
 		times, inputs, clocks, outputs = CompactClocks(inputs, clocks, clockPolarities, outputs)
 
-		inputLength = len(list(job.inputSequence.values())[0])
+		inputLength = max([0] + [len(value) for value in inputs.values()])
 		if len(times) != inputLength:
 			return SimulationResult(
 				jobId=job.jobId,
@@ -417,7 +438,7 @@ def RunFaultSimulationJob(job: SimulationJob) -> SimulationResult:
 			jobId=job.jobId,
 			spiceCompleted=True,
 			measureResult=SpiceMeasurement(
-				timeValues=range(max([len(values) for values in job.inputSequence.values()])),
+				timeValues=range(max([0] + [len(values) for values in job.inputSequence.values()])),
 				inputValues=inputs,
 				clockValues=clocks,
 				outputValues=outputs,
@@ -425,21 +446,20 @@ def RunFaultSimulationJob(job: SimulationJob) -> SimulationResult:
 			)
 		)
 
-	debug('Injecting faults')
 	faultParams = FaultParameters(
-		**GetFaultOverrides(library.get('fault', {}))
+		**(GetFaultOverrides(library.get('fault', {}))
+	 		| GetFaultOverrides(library.get('overrides', {}).get(job.cellInfo.name, {})))
 	)
 	faultyCell = InjectFault(job.cellInfo, job.faultInjection, faultParams)
 
-	debug('Generating simulation parameters')
 	testbenchParams = TestbenchParameters(
-		**GetTestbenchOverrides(library.get('testbench', {})),
+		**(GetTestbenchOverrides(library.get('testbench', {}))
+	 		| GetTestbenchOverrides(library.get('overrides', {}).get(job.cellInfo.name, {}))),
 		TRANSISTOR_MODELS=includePaths,
 		CELL_MODEL=faultyCell
 	)
 	simulationParams, measurementParams = GenerateSimulationParameters(job, testbenchParams)
 
-	debug('Generating testbench')
 	testbenchGenerator = SpiceTestbenchGenerator(job.cellInfo, testbenchParams, simulationParams)
 
 	if DebugOptions.ExportTestbench in debugOptions:
@@ -451,13 +471,12 @@ def RunFaultSimulationJob(job: SimulationJob) -> SimulationResult:
 	if DebugOptions.FinishAfterTestbench in debugOptions:
 		return SimulationResult(job.jobId)
 
-	debug('Running simulation')
 	try:
 		simulationResult = SpiceSimulate(job.cellInfo, testbenchGenerator.circuit, simulationParams)
 
 		# If simulation was aborted prematurely we assume that instability is the reason.
 		timeTarget, timeStep = simulationParams.SIMULATION_TIME, simulationParams.SIMULATION_STEP
-		timeReached = max(simulationResult.timeValues)
+		timeReached = max([0@u_s] + simulationResult.timeValues)
 		simulationCompleted = (timeReached + timeStep) >= timeTarget
 	except SpiceException as exception:
 		warning(f'Job {job.jobId} failed: {exception}')
@@ -478,7 +497,6 @@ def RunFaultSimulationJob(job: SimulationJob) -> SimulationResult:
 	if DebugOptions.FinishAfterSimulation in debugOptions:
 		return SimulationResult(job.jobId, spiceCompleted=simulationCompleted)
 
-	debug('Running measurements')
 	try:
 		measurementResult = SpiceMeasure(job.cellInfo, simulationResult, measurementParams)
 
@@ -530,8 +548,8 @@ def RunFaultSimulationJob(job: SimulationJob) -> SimulationResult:
 
 
 def GenerateSimulationParameters(job: SimulationJob, testbenchParams: TestbenchParameters):
-	inputLength = len(list(job.inputSequence.values())[0])
-	if inputLength == 1 and len(job.cellInfo.clocks) == 0:
+	inputLength = max([0] + [len(value) for value in job.inputSequence.values()])
+	if inputLength <= 1 and len(job.cellInfo.clocks) == 0:
 		simulationParams = SimulationParameters(
 			SIMULATION_TYPE=SimulationType.STATIC_OPERATING_POINT,
 			SIMULATION_TIME=0@u_s,
@@ -544,7 +562,8 @@ def GenerateSimulationParameters(job: SimulationJob, testbenchParams: TestbenchP
 		measurementParams = MeasurementParameters(
 			SUPPLY_VOLTAGE_LOW=0@u_V,
 			SUPPLY_VOLTAGE_HIGH=testbenchParams.SUPPLY_VOLTAGE,
-			**GetMeasurementOverrides(library.get('measurement', {})),
+			**(GetMeasurementOverrides(library.get('measurement', {}))
+	  			| GetMeasurementOverrides(library.get('overrides', {}).get(job.cellInfo.name, {}))),
 			TRANSITION_START_TIMES=[0@u_s],
 			TRANSITION_END_TIMES=[0@u_s],
 			MEASUREMENT_TIMES=[0@u_s],
@@ -553,102 +572,99 @@ def GenerateSimulationParameters(job: SimulationJob, testbenchParams: TestbenchP
 		cellName = job.cellInfo.name
 		cellTiming = job.cellTiming
 
-		propagationDelayFactor = testbenchParams.PROPAGATION_DELAY_FACTOR
-		propagationConstraintFactor = testbenchParams.PROPAGATION_CONSTRAINT_FACTOR
-		outputTransitionFactor = testbenchParams.OUTPUT_TRANSITION_FACTOR
 		deltaMeasurement = testbenchParams.DELTA_MEASUREMENT
 		inputSetupTime = testbenchParams.INPUT_SETUP_TIME
 		inputTransitionTime = testbenchParams.INPUT_TRANSITION_TIME
 		loadCapacitance = testbenchParams.LOAD_CAPACITANCE
-
-		# Adjust load capacitance if required as not all gates have a range
-		# where the default load capacitance falls into
-		for info in itertools.chain(*cellTiming.values()):
-			for table in info.propagationDelay + info.transitionDelay:
-				minLoadCapacitance = min(table.inputRise.loadCapacitances[0],  table.inputFall.loadCapacitances[0])
-				maxLoadCapacitance = max(table.inputRise.loadCapacitances[-1], table.inputFall.loadCapacitances[-1])
-
-				if loadCapacitance < minLoadCapacitance:
-					warning(f'Increasing load capacitance for cell {cellName} from {loadCapacitance} to {minLoadCapacitance}')
-					loadCapacitance = minLoadCapacitance
-
-				elif loadCapacitance > maxLoadCapacitance:
-					warning(f'Decreasing load capacitance for cell {cellName} from {loadCapacitance} to {maxLoadCapacitance}')
-					loadCapacitance = maxLoadCapacitance
-
-		testbenchParams.LOAD_CAPACITANCE = loadCapacitance
 
 		simTime = [0@u_s]
 		simInputs = []
 		simMeasurements = []
 		simTransitionStarts = []
 		simTransitionEnds = []
+		_GetCurrentTime = lambda: simTime[0]
 		_AddMeasurementMarker = lambda: simMeasurements.append(simTime[0])
 		_AddTransitionStartMarker = lambda: simTransitionStarts.append(simTime[0])
 		_AddTransitionEndMarker = lambda: simTransitionEnds.append(simTime[0])
-		_AddInputs = lambda inputs: simInputs.append((simTime[0], inputs))
+
 		def _AddDelay(time: UnitValue) -> UnitValue:
 			# Make sure to copy simTime as otherwise all instances are changed.
-			simTime[0] = simTime[0] + time
+			# Using += would otherwise modify all instances.
+			simTime[0] = _GetCurrentTime() + time
+
+		def _AddInputs(inputs):
+			if len(simInputs) == 0 or simTime[0] > simInputs[-1][0]:
+				simInputs.append((simTime[0], inputs))
+			elif simTime[0] == simInputs[-1][0]:
+				assert inputs == simInputs[-1][1]
+
+		def _EndInputs():
+			if len(simInputs) == 0 or simTime[0] > simInputs[-1][0]:
+				simInputs.append((simTime[0], simInputs[-1][1]))
+			_AddDelay(1e-15@u_s)
 
 		# We assume all clocks have the same polarity and are clocking every timeframe
 		clockPolarities = dict(zip(job.cellInfo.clocks, job.cellInfo.clockPolarities))
 		indices, inputs, clocks = ExpandClocks(job.inputSequence, job.clockSequence, clockPolarities)
 
 		# Split input sequences into timeframes and merge inputs and clocks to predict
-		# required setup, hold and delay times.
+		# required delay, transition, setup and hold times.
 		timeframes = [{
 			**{ inputName: inputValue[index] for inputName, inputValue in inputs.items() },
 			**{ clockName: clockValue[index] for clockName, clockValue in clocks.items() }
 		} for index in range(len(indices)) ]
 
-		_AddInputs(timeframes[0])
-		_AddDelay(inputSetupTime)
+		if len(timeframes) > 0:
+			_AddInputs(timeframes[0])
+			_AddDelay(inputSetupTime)
+			_EndInputs()
 
-		for timeframe in range(-1, len(timeframes)-1):
-			if timeframe >= 0:
-				transitions = GetPatternTransitions(timeframes[timeframe], timeframes[timeframe + 1])
-				currentTimeframe = timeframes[timeframe]
-				nextTimeframe = timeframes[timeframe + 1]
-			else:
-				# Virtual transitions for initial delay when going from "no-state" to initial state
-				transitions = { port: ('rising' if value == '1' else 'falling') for port, value in timeframes[0].items() }
-				currentTimeframe = timeframes[0]
-				nextTimeframe = timeframes[0]
+		timingConstraints = GetTimingConstraints(cellName, cellTiming, inputTransitionTime, loadCapacitance, timeframes)
+		timeframeEnds = []
+		for timeframe in range(len(timeframes)):
+			constraints = timingConstraints[timeframe]
 
-			maxPropagationDelay = 0@u_s
-			maxTransitionDelay = 0@u_s
-			maxTransitionConstraint = 0@u_s
+			delayCell = constraints.cellDelay * testbenchParams.CELL_DELAY_FACTOR
+			delayTransition = constraints.transitionDelay * testbenchParams.TRANSITION_DELAY_FACTOR
+			delayPropagation = constraints.propagationDelay * testbenchParams.PROPAGATION_DELAY_FACTOR
+			delayStable = max(0@u_s, max(delayCell, delayPropagation) + delayTransition)
 
-			for transitionPort, transition in transitions.items():
-				timingInfos = GetPortTimingInfo(cellName, cellTiming, transitionPort, transition, inputTransitionTime, loadCapacitance, currentTimeframe)
-				if len(timingInfos) == 0:
-					conditions = ', '.join(f'{name}={value}' for name, value in currentTimeframe.items())
-					debug(f'No timing info found for transition input {transitionPort} in cell {cellName} with conditions {conditions}')
+			delaySetup = 0@u_s
+			for setupTimeframe, setupConstraint in constraints.setupConstraints.items():
+				timeReference = _GetCurrentTime() if (setupTimeframe >= timeframe) else timeframeEnds[setupTimeframe]
+				timeElapsed = _GetCurrentTime() - timeReference
+				delaySetup = max(delaySetup, setupConstraint * testbenchParams.CONSTRAINT_FACTOR - timeElapsed)
 
-				for _, info in timingInfos.items():
-					maxPropagationDelay = max(info.propagationDelay, maxPropagationDelay)
-					maxTransitionDelay = max(info.transitionDelay, maxTransitionDelay)
-					maxTransitionConstraint = max(info.transitionConstraint, maxTransitionConstraint)
+			delayHold = 0@u_s
+			for holdTimeframe, holdConstraint in constraints.holdConstraints.items():
+				timeReference = _GetCurrentTime() if (holdTimeframe >= timeframe) else timeframeEnds[holdTimeframe]
+				timeElapsed = _GetCurrentTime() - timeReference
+				delayHold = max(delayHold, holdConstraint * testbenchParams.CONSTRAINT_FACTOR - timeElapsed)
 
-			calcTransitionConstraint = maxTransitionConstraint * propagationConstraintFactor
-			calcPropagationDelay = maxPropagationDelay * propagationDelayFactor
-			calcTransitionDelay = maxTransitionDelay * outputTransitionFactor
-			calcTransitionTime = max(calcTransitionConstraint, calcPropagationDelay) + calcTransitionDelay
+			if delaySetup > 0@u_s:
+				_AddDelay(delaySetup)
+				_EndInputs()
+
+			if delayHold > 0@u_s:
+				_AddDelay(delayHold)
+				_EndInputs()
 
 			_AddTransitionStartMarker()
-			_AddInputs(nextTimeframe)
-			_AddDelay(calcTransitionTime)
+			_AddInputs(timeframes[timeframe])
+			_AddDelay(inputTransitionTime)
+			_AddDelay(delayStable)
 			_AddTransitionEndMarker()
 
 			_AddDelay(deltaMeasurement)
 			_AddMeasurementMarker()
+			_EndInputs()
 
-			_AddInputs(nextTimeframe)
-			_AddDelay(inputTransitionTime)
+			timeframeEnds.append(_GetCurrentTime())
 
-		_AddInputs(timeframes[-1])
-		_AddDelay(inputSetupTime)
+		if len(timeframes) > 0:
+			_AddInputs(timeframes[-1])
+			_AddDelay(inputSetupTime)
+			_EndInputs()
 
 		inputSteps = [time for time, _ in simInputs]
 		inputValues = ConvertPatternsToFilteredSequence([inputs for _, inputs in simInputs], job.cellInfo.inputs)
@@ -665,7 +681,8 @@ def GenerateSimulationParameters(job: SimulationJob, testbenchParams: TestbenchP
 		measurementParams = MeasurementParameters(
 			SUPPLY_VOLTAGE_LOW=0@u_V,
 			SUPPLY_VOLTAGE_HIGH=testbenchParams.SUPPLY_VOLTAGE,
-			**GetMeasurementOverrides(library.get('measurement', {})),
+			**(GetMeasurementOverrides(library.get('measurement', {}))
+	  			| GetMeasurementOverrides(library.get('overrides', {}).get(cellName, {}))),
 			TRANSITION_START_TIMES=simTransitionStarts,
 			TRANSITION_END_TIMES=simTransitionEnds,
 			MEASUREMENT_TIMES=simMeasurements,
@@ -678,7 +695,7 @@ def ProcessMeasurement(job: SimulationJob, measurement: SpiceMeasurement) -> Spi
 	if len(job.cellInfo.clocks) == 0:
 		return measurement
 	else:
-		inputLength = len(list(job.inputSequence.values())[0])
+		inputLength = max([0] + [len(value) for value in job.inputSequence.values()])
 		clockPolarities = { clock: polarity for clock, polarity in zip(job.cellInfo.clocks, job.cellInfo.clockPolarities) }
 		indices, inputs, clocks, outputs = CompactClocks(measurement.inputValues, measurement.clockValues, clockPolarities, measurement.outputValues)
 		times = [measurement.timeValues[timeframe] for timeframe in indices]
@@ -726,12 +743,13 @@ def GetTestbenchOverrides(params: Dict[str, Any]) -> Dict[str, Any]:
 		'LOAD_CAPACITANCE':              u_F,
 		'INPUT_SETUP_TIME':              u_s,
 		'INPUT_TRANSITION_TIME':         u_s,
-		'PROPAGATION_DELAY_FACTOR':      None,
-		'PROPAGATION_CONSTRAINT_FACTOR': None,
-		'OUTPUT_TRANSITION_FACTOR':      None,
 		'DELTA_MEASUREMENT':             u_s,
 		'SIMULATION_STEP':               u_s,
 		'SIMULATION_GMIN':               u_S,
+		'CELL_DELAY_FACTOR':             None,
+		'TRANSITION_DELAY_FACTOR':       None,
+		'PROPAGATION_DELAY_FACTOR':      None,
+		'CONSTRAINT_FACTOR':             None,
 	})
 
 

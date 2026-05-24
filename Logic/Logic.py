@@ -82,8 +82,9 @@ class VariableProxy:
 def NormalizeEquation(equation: str) -> str:
 	# Normalize whitespace
 	equation = re.sub(r"\s+", ' ', equation)
-	# Replace inversions with a tick (a' -> ~a)
+	# Replace inversions that use a tick (a' -> ~a) and ((a b)' -> (a b)^1)
 	equation = re.sub(r"([A-Za-z]+)'", r'~\1', equation)
+	equation = re.sub(r"'", r'^1', equation)
 	# Replace and operations that are denoted by a space (a b -> a & b)
 	equation = re.sub(r"([A-Za-z]+)\s+(?=[A-Za-z])", r'\1 & ', equation)
 	# Normalize operators
@@ -130,6 +131,6 @@ def EvaluateEquations(equations: Dict[str, str], inputs: Dict[str, str]) -> Dict
 
 
 def _InputsToTimeframes(inputs: Dict[str, str]) -> Iterable[Dict[str, str]]:
-	timeframes = max([len(value) for value in inputs.values()])
+	timeframes = max([0] + [len(value) for value in inputs.values()])
 	for timeframe in range(timeframes):
 		yield dict([(key, inputs[key][timeframe]) for key in inputs.keys()])
