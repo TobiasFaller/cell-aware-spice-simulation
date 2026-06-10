@@ -63,7 +63,7 @@ class SpiceTestbenchGenerator:
 				else simulationParams.INPUT_CLOCKS[port]
 			if len(logicValues) > 1:
 				inputPoints = [
-					f"{float(time) + port_index*1e-12}s {_GetVoltageLevel(voltage)}V"
+					f"{float(time)}s {_GetVoltageLevel(voltage)}V"
 					for voltage, time in zip(logicValues, simulationParams.INPUT_STEPS)
 				]
 				supplyFunction = f"PWL({' '.join(inputPoints)})"

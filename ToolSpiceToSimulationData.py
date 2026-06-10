@@ -322,6 +322,42 @@ def Main() -> None:
 			simulationsFailed += 1
 			continue
 
+		validateInputs = {
+			port: (value, result.measureResult.inputValues.get(port, None))
+			for port, value in params.inputSequence.items()
+		}
+		validateClocks = {
+			port: (value, result.measureResult.clockValues.get(port, None))
+			for port, value in params.clockSequence.items()
+		}
+
+		missingInput = False
+		wrongInput = False
+		for port, (value, measure) in (validateInputs | validateClocks).items():
+			if measure is None:
+				exception = ValueError(f'Input {port} in cell {cellName} measurement missing')
+				simulationStatus[cellName][faultName] += [f'job {result.jobId} input error: {exception}']
+				simulationsFailed += 1
+				missingInput = True
+				break
+
+			for inputValue, measureValue in zip(value, measure):
+				if not {
+					'X': measureValue in '01X',
+					'0': measureValue in '0',
+					'1': measureValue in '1',
+					'P': measureValue in 'P',
+				}.get(inputValue):
+					exception = ValueError(f'Input {port} in cell {cellName} measurement wrong (expected {inputValue}, got {measureValue})')
+					simulationStatus[cellName][faultName] += [f'job {result.jobId} input error: {exception}']
+					simulationsFailed += 1
+					wrongInput = True
+					break
+			if wrongInput:
+				break
+		if missingInput or wrongInput:
+			continue
+
 		if result.spiceCompleted:
 			simulationStatus[cellName][faultName] += [f'job {result.jobId} simulated']
 		else:

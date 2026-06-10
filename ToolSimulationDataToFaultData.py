@@ -13,8 +13,7 @@ from Logging.Logging import ParseOptions, ParseEnumList
 from Spice.SpiceFaultInjector import FaultType
 from Simulation.SimulationData import SimulationData,  SimulationCategory, \
 	SimulationFault, SimulationRun
-from Simulation.ClassificationData import ClassificationData, ClassificationCategory, \
-	ClassificationStatus
+from Simulation.ClassificationData import ClassificationCategory, ClassificationStatus
 
 
 class DebugOptions(StrEnum):
