@@ -12,7 +12,7 @@ export GENERIC_CELLS=^(BUF|AND|OR|XOR|INV|NAND|NOR|XNOR|MUX|DL|DLR|DFF|DFFR)$$
 export RUN_STEPS=${ALL_STEPS}
 export RUN_FAULTS=${ALL_FAULTS}
 export RUN_INPUTS=${ALL_INPUTS}
-export RUN_CELLS=${NANGATE45_CELLS}
+export RUN_CELLS=${ALL_CELLS}
 export DEBUG_VERBOSE=--verbose
 export DEBUG_LIBERTY_META=
 export DEBUG_FAULT_INJECTION=#--debug export-plan export-testbench export-simulation export-measurement plot-simulation plot-measurement
@@ -80,7 +80,7 @@ fault-evaluation:
 	mkdir -p "${OUTPUT_PATH}/2-faults"
 	pypy3 ToolSimulationDataToFaultData.py ${DEBUG_VERBOSE} ${DEBUG_FAULT_EVALUATION} \
 		--input "${OUTPUT_PATH}/1-simulation/simulation.data.json.gz" \
-		--input-compress \
+		--input-compressed \
 		--output "${OUTPUT_PATH}/2-faults" \
 		--output-compress \
 		2>&1 | tee "${OUTPUT_PATH}/2-faults/process-evaluation.log"
@@ -98,7 +98,7 @@ fault-evaluation:
 fault-export:
 	pypy3 ToolFaultDataToJson.py ${DEBUG_VERBOSE} ${DEBUG_CONVERT_JSON} \
 		--input "${OUTPUT_PATH}/2-faults/fault.data.json.gz" \
-		--input-compress \
+		--input-compressed \
 		--output "${OUTPUT_PATH}/2-faults/fault.patterns.json.gz" \
 		--output-compress \
 		2>&1 | tee "${OUTPUT_PATH}/2-faults/process-json.log"
@@ -107,7 +107,7 @@ fault-export:
 
 	pypy3 ToolFaultDataToStateMachine.py ${DEBUG_VERBOSE} ${DEBUG_CONVERT_STATEMACHINE} \
 		--input "${OUTPUT_PATH}/2-faults/fault.data.json.gz" \
-		--input-compress \
+		--input-compressed \
 		--output "${OUTPUT_PATH}/2-faults/fault.statemachine.json.gz" \
 		--output-compress \
 		2>&1 | tee "${OUTPUT_PATH}/2-faults/process-statemachine.log"
@@ -116,7 +116,7 @@ fault-export:
 
 	pypy3 ToolFaultDataToUdfm.py ${DEBUG_VERBOSE} ${DEBUG_CONVERT_UDFM} \
 		--input "${OUTPUT_PATH}/2-faults/fault.data.json.gz" \
-		--input-compress \
+		--input-compressed \
 		--output "${OUTPUT_PATH}/2-faults/fault.udfm.gz" \
 		--output-compress \
 		--format tessent-compact \
@@ -137,8 +137,25 @@ fault-export:
 fault-plot:
 	pypy3 UtilityFaultStatistics.py ${DEBUG_VERBOSE} ${DEBUG_FAULT_PLOT} \
 		--input "${OUTPUT_PATH}/2-faults/fault.status.json.gz" \
-		--input-compress \
+		--input-compressed \
 		--output "${OUTPUT_PATH}/2-fault.status.png" \
+		--type simple \
 		2>&1 | tee "${OUTPUT_PATH}/2-faults/process-plot.log"
 	ln -sTf "${OUTPUT_PATH}/2-faults/process-plot.log" "${OUTPUT_PATH}/2-fault-plot.log"
+
+meta-plot:
+	pypy3 UtilityCellSizes.py ${DEBUG_VERBOSE} ${DEBUG_META_PLOT} \
+		--input "${OUTPUT_PATH}/0-meta/library.meta.json" \
+		--output "${OUTPUT_PATH}/0-meta.cells.png" \
+		2>&1 | tee "${OUTPUT_PATH}/0-meta/process-plot.log"
+	ln -sTf "${OUTPUT_PATH}/0-meta/process-plot.log" "${OUTPUT_PATH}/0-meta-plot.log"
+
+pattern-plot:
+	pypy3 UtilityPatternCounts.py ${DEBUG_VERBOSE} ${DEBUG_PATTEN_PLOT} \
+		--input-data "${OUTPUT_PATH}/2-faults/fault.data.json.gz" \
+		--input-status "${OUTPUT_PATH}/2-faults/fault.status.json.gz" \
+		--input-compressed \
+		--output "${OUTPUT_PATH}/2-fault.patterns.png" \
+		2>&1 | tee "${OUTPUT_PATH}/2-faults/process-pattern-plot.log"
+	ln -sTf "${OUTPUT_PATH}/2-faults/process-pattern-plot.log" "${OUTPUT_PATH}/2-pattern-plot.log"
 

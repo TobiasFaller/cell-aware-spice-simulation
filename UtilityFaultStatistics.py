@@ -2,7 +2,6 @@ import json
 import argparse
 import pathlib
 import gzip
-import numpy
 import matplotlib.pyplot as pyplot
 import matplotlib.legend as plegend
 
@@ -10,6 +9,7 @@ from typing import Dict, Any
 from collections import defaultdict
 from enum import StrEnum
 from logging import info, debug
+from PIL import Image
 
 from Logging.Logging import ParseOptions, ParseEnum, ParseEnumList
 from Simulation.ClassificationData import ClassificationCategory, ClassificationStatus
@@ -24,6 +24,54 @@ ClassificationSummary = Dict[str, Dict[str, int]]
 class DebugOptions(StrEnum):
 	pass
 
+DESIGNS = {
+	'light': {
+		'pyplot': {
+			'hatch.linewidth': 3,
+			'hatch.color': '#00000055',
+		},
+		'groups': { 'color': 'black', 'linestyle': '--', 'linewidth': 1.5 },
+		'status': {
+			'detected':             { 'color': '#1f77b4' },
+			'equivalent-detected':  { 'color': '#8cbde0' },
+			'undefined':            { 'color': "#ffab0e" },
+			'equivalent-undefined': { 'color': "#f3e45f" },
+			'undetected':           { 'color': "#f33535" },
+
+			'detected':   { 'color': '#DAE8FC', 'edgecolor': '#6C8EBF', 'linewidth': 1.0 },
+			'undefined':  { 'color': "#F5F5F5", 'edgecolor': '#666666', 'linewidth': 1.0 },
+			'undetected': { 'color': "#F8CECC", 'edgecolor': '#B85450', 'linewidth': 1.0 },
+		}
+	},
+
+	'dark': {
+		'pyplot': {
+			'hatch.linewidth': 3,
+			'hatch.color': '#00000099',
+			'text.color': 'white',
+			'savefig.edgecolor': 'white',
+			'patch.edgecolor': 'white',
+			'boxplot.whiskerprops.color': 'white',
+			'boxplot.flierprops.markeredgecolor': 'white',
+			'boxplot.capprops.color': 'white',
+			'boxplot.boxprops.color': 'white',
+			'axes.labelcolor': 'white',
+			'axes.edgecolor': 'white',
+			'ytick.color': 'white',
+			'xtick.color': 'white',
+			'legend.labelcolor': 'black',
+		},
+		'groups': { 'color': 'white', 'linestyle': '--' },
+		'status': {
+			'detected':             { 'color': '#1f77b4' },
+			'equivalent-detected':  { 'color': '#8cbde0' },
+			'undefined':            { 'color': "#ffab0e" },
+			'equivalent-undefined': { 'color': "#f3e45f" },
+			'undetected':           { 'color': "#f33535" },
+		}
+	}
+}
+
 
 def Main() -> None:
 	parser = argparse.ArgumentParser(
@@ -33,7 +81,8 @@ def Main() -> None:
 	)
 	parser.add_argument('--input', dest='input_path', type=str, required=True, help='Path to fault statistics file')
 	parser.add_argument('--input-compressed', dest='input_compress', action='store_true', default=False, help='Assume input is compressed')
-	parser.add_argument('--output', dest='output_path', type=str, required=True, help='Output plots to this path')
+	parser.add_argument('--output', dest='output_path', type=str, required=True, help='Output plot to this path')
+	parser.add_argument('--type', dest='plot_type', type=str, required=True, help='Plot type (full, simple)')
 	parser.add_argument('-d', '--debug', dest='debug', type=str, nargs='*', default=[], help='Enable debug options (use -h debug for supported options)')
 	parser.add_argument('-v', '--verbose', dest='verbose', action='store_true', default=False, help='Enable verbose logging')
 	options = ParseOptions(parser, [
@@ -54,39 +103,32 @@ def Main() -> None:
 	with open_func(options.input_path, 'rt', encoding='utf-8') as stream:
 		classifications: ClassificationCategory = ClassificationCategory.FromDict(json.load(stream))
 
-	info(f'Plotting both statistics to {options.output_path}')
-	_PlotStatistics(options.output_path, _GetStatistics(classifications))
+	statistics = _GetStatistics(classifications)
+	info(f'Plotting statistics to {options.output_path}')
+	if options.plot_type == 'full':
+		_PlotStatistics(options.output_path, statistics, STYLE)
+	elif options.plot_type == 'simple':
+		statistics = {
+			key: {
+				'undetected': values['undetected'],
+				'undefined': values['undefined'] + values['equivalent-undefined'],
+				'detected': values['detected'] + values['equivalent-detected'],
+			} for key, values in statistics.items()
+		}
+		_PlotStatistics(options.output_path, statistics, STYLE)
 
 
-def _PlotStatistics(path: pathlib.Path, statistics: ClassificationSummary) -> None:
-	if STYLE == 'light':
-		pyplot.rcParams['hatch.linewidth'] = 3
-		pyplot.rcParams['hatch.color'] = '#00000055'
-		groupstyle = { 'color': 'black', 'linestyle': '--' }
-	elif STYLE == 'dark':
-		pyplot.rcParams['hatch.linewidth'] = 3
-		pyplot.rcParams['hatch.color'] = '#00000099'
-		pyplot.rcParams['text.color'] = 'white'
-		pyplot.rcParams['savefig.edgecolor'] = 'white'
-		pyplot.rcParams['patch.edgecolor'] = 'white'
-		pyplot.rcParams['boxplot.whiskerprops.color'] = 'white'
-		pyplot.rcParams['boxplot.flierprops.markeredgecolor'] = 'white'
-		pyplot.rcParams['boxplot.capprops.color'] = 'white'
-		pyplot.rcParams['boxplot.boxprops.color'] = 'white'
-		pyplot.rcParams['axes.labelcolor'] = 'white'
-		pyplot.rcParams['axes.edgecolor'] = 'white'
-		pyplot.rcParams['ytick.color'] = 'white'
-		pyplot.rcParams['xtick.color'] = 'white'
-		pyplot.rcParams['legend.labelcolor'] = 'black'
-		groupstyle = { 'color': 'white', 'linestyle': '--' }
+def _PlotStatistics(path: pathlib.Path, statistics: ClassificationSummary, style) -> None:
+	pyplot.rcParams.update(DESIGNS[style]['pyplot'])
 
 	fig, ax1 = pyplot.subplots()
-	fig.set_size_inches(10.0, 6.0)
+	fig.set_size_inches(8, 5)
 	fig.tight_layout(pad=5)
 	ax2 = ax1.twinx()
 
 	space = 0.1
 	groupspace = 1.0
+	padding = 10
 
 	previousAxis = 1
 	hoffset = 0.0
@@ -99,7 +141,7 @@ def _PlotStatistics(path: pathlib.Path, statistics: ClassificationSummary) -> No
 		design = _GetCategoryDesign(label)
 		axis = ax1 if design['axis'] == 1 else ax2
 		if design['axis'] == 2 and previousAxis == 1:
-			pyplot.axvline(hoffset + groupspace / 2.0, **groupstyle)
+			pyplot.axvline(hoffset + groupspace / 2.0, **DESIGNS[style]['groups'])
 			hoffset += groupspace
 		elif index != 0:
 			hoffset += space
@@ -108,7 +150,7 @@ def _PlotStatistics(path: pathlib.Path, statistics: ClassificationSummary) -> No
 		voffset = 0.0
 		rects = []
 		for metric, value in stats.items():
-			rects.append(axis.bar(hoffset + 0.5, value, 1.0, bottom=voffset, **_GetStatusDesign(metric)))
+			rects.append(axis.bar(hoffset + 0.5, value, 1.0, bottom=voffset, **DESIGNS[style]['status'][metric]))
 			voffset += value
 		hoffset += 1.0
 		elements += [ rects ]
@@ -116,19 +158,29 @@ def _PlotStatistics(path: pathlib.Path, statistics: ClassificationSummary) -> No
 		voffsets += [ voffset ]
 		hoffsets += [ hoffset - 0.5 ]
 
-	ax1.set_title('Fault Classifications')
-	ax1.set_xticks(hoffsets, [label for label, _ in sortedStatistics], rotation=45, ha='center')
+	ax1.set_title('Defects')
+	ax1.set_xticks(hoffsets, [label for label, _ in sortedStatistics], rotation=20, ha='center')
 	ax1.set_ylabel('Faults')
 	ax1.set_yscale('linear')
 	ax2.set_ylabel('Faults')
 	ax2.set_yscale('linear')
 
-	labelElements = elements[0]
-	labelNames = [_GetLabelName(label) for label in labels[0]]
+	labelElements = elements[0][::-1]
+	labelNames = [_GetLabelName(label) for label in labels[0]][::-1]
 	legend = plegend.Legend(ax1, labelElements, labelNames, loc='upper left')
 	ax1.add_artist(legend)
 
 	fig.savefig(path, dpi=300, transparent=True)
+
+	image = Image.open(path)
+	boundingbox = image.getbbox()
+	image = image.crop((
+		boundingbox[0] - padding,
+		boundingbox[1] - padding,
+		boundingbox[2] + padding,
+		boundingbox[3] + padding
+	))
+	image.save(path, format='PNG')
 
 
 def _GetStatistics(classifications: ClassificationCategory) -> ClassificationSummary:
@@ -167,17 +219,6 @@ def _GetStatistics(classifications: ClassificationCategory) -> ClassificationSum
 					summary[categoryName][f'equivalent-{status}' if equivalent else status] += 1
 					break
 	return summary
-
-
-def _GetStatusDesign(status: str) -> Dict[str, Any]:
-	""" Taken from https://matplotlib.org/stable/users/prev_whats_new/dflt_style_changes.html """
-	return {
-		'detected':              { 'color': '#1f77b4' },
-		'equivalent-detected':   { 'color': '#8cbde0' },
-		'undefined':             { 'color': "#ffab0e" },
-		'equivalent-undefined':  { 'color': "#f3e45f" },
-		'undetected':            { 'color': "#f33535" },
-	}.get(status)
 
 
 def _GetCategoryDesign(categoryName: str) -> Dict[str, Any]:

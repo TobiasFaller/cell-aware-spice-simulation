@@ -9,6 +9,8 @@ from logging import info, debug
 from Liberty.CellImporter import ImportLibertyCells
 from Logging.Logging import ParseOptions, ParseEnumList
 from Logic.Logic import NormalizeEquation
+from Spice.SpiceParser import ParseSpiceCell
+from PySpice.Spice.Netlist import Element
 
 class DebugOptions(StrEnum):
 	pass
@@ -50,6 +52,7 @@ if __name__ == '__main__':
 
 	libraryPath = pathlib.Path(options.library_path)
 	libertyPath = libraryPath / library['paths']['liberty']
+	spicePath = libraryPath / library['paths']['spice']
 	libertyData = ImportLibertyCells(libertyPath)
 
 	info('------------------------ EXPORTING META DATA -----------------------')
@@ -84,6 +87,17 @@ if __name__ == '__main__':
 		latch = cell.attributes['latch'] if 'latch' in cell.attributes else False
 		flipflop = cell.attributes['flipflop'] if 'flipflop' in cell.attributes else False
 
+		path = spicePath.with_name(spicePath.name.replace('{cell}', cell_name))
+		cell_spice = ParseSpiceCell(path, cell_name)
+		transistors = 0
+		for element in cell_spice.elements:
+			if isinstance(element, Element):
+				name = element.model.lower()
+				transistors += 1 if ('nmos' in name or 'pmos' in name) else 0
+			else:
+				#print(f'Unknown element: {type(element).__name__}')
+				pass
+
 		meta[cell_name] = {
 			'inputs': inputs,
 			'outputs': outputs,
@@ -94,7 +108,8 @@ if __name__ == '__main__':
 			**({'sequential': True} if sequential else {}),
 			**({'latch': True} if latch else {}),
 			**({'flipflop': True} if flipflop else {}),
-			'equations': cell.equations
+			'equations': cell.equations,
+			'transistors': transistors
 		}
 
 	with open(options.output_path, 'wt', encoding='utf-8') as stream:

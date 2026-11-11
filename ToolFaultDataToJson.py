@@ -52,7 +52,15 @@ def Main() -> None:
 				output[cellName][faultName] = [
 					{
 						'inputs': run.inputs,
-						'outputs': run.outputs,
+						'clocks': run.clocks,
+						'outputs': {
+							outputName: output \
+								.replace('x', 'X') \
+								.replace('*', 'X') \
+								.replace('v', '0') \
+								.replace('^', '1')
+							for outputName, output in run.outputs.items()
+						},
 					} for run in fault.runs
 				]
 

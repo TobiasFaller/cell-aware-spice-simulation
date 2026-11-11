@@ -27,10 +27,11 @@ def AlwaysExclude(value):
 @dataclass
 class Transition:
 	toState: int = field(metadata=config(field_name='to-state'))
-	accepting: bool
 	inputs: Dict[str, str]
 	clocks: Dict[str, str]
 	outputs: Dict[str, str]
+	propagations: List[str]
+	unknowns: List[str]
 	meta: Dict[str, str] = field(metadata=config(exclude=AlwaysExclude), default_factory=lambda: { 'runs': set() })
 
 
@@ -113,7 +114,15 @@ def _CreateStateMachine(cellName: str, faultName: str, runs: List[SimulationRun]
 			stateTo = len(states)
 			states.append(State())
 
-		transition = Transition(toState=stateTo, inputs=inputs, clocks=clocks, outputs=outputs, accepting=False)
+		propagations = []
+		unknowns = []
+		for outputName, output in outputs.items():
+			if output in ['*', 'x']:
+				unknowns.append(outputName)
+			if output in ['^', 'v']:
+				propagations.append(outputName)
+
+		transition = Transition(stateTo, inputs, clocks, outputs, propagations, unknowns)
 		states[stateFrom].transitions.append(transition)
 		return transition
 
@@ -133,15 +142,22 @@ def _CreateStateMachine(cellName: str, faultName: str, runs: List[SimulationRun]
 			inputs = { input: value[timeframe] for input, value in run.inputs.items() }
 			clocks = { clock: value[timeframe] for clock, value in run.clocks.items() }
 			outputs = { output: value[timeframe] for output, value in run.outputs.items() }
-			difference = any([ output in "01" for output in outputs.values() ])
 
 			transition = _GetOrCreateTransition(run.jobId, currentState, 0 if last else None, inputs, clocks, outputs)
 			transition.meta['runs'].add(run.jobId)
 			states[currentState].meta['runs'].add(run.jobId)
-			transition.accepting |= (last and difference)
 			currentState = transition.toState
 
 		states[currentState].meta['runs'].add(run.jobId)
+
+	for state in states:
+		for transition in state.transitions:
+			for outputName, output in transition.outputs.items():
+				transition.outputs[outputName] = output \
+					.replace('x', 'X') \
+					.replace('*', 'X') \
+					.replace('v', '0') \
+					.replace('^', '1')
 
 	return states
 

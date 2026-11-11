@@ -28,8 +28,8 @@ LookupKey = Tuple[Assignment, Assignment]
 Pattern = Tuple[Assignment, Assignment, Assignment]
 
 
-REGEX_DIFFERENCE = re.compile('D|X')
-REGEX_PROPAGATION = re.compile('D')
+REGEX_DIFFERENCE = re.compile('\\^|v|\\*|x')
+REGEX_PROPAGATION = re.compile('\\^|v')
 
 
 def Main():
@@ -142,16 +142,11 @@ def Main():
 	})
 	filteredData = None
 
-	maskedData, differenceData = _ComputeDifferences(goldenData, faultyData)
+	differenceData = _ComputeDifferences(goldenData, faultyData)
 	faultyData = None
 
 	if DebugOptions.ExportDifferences in debugOptions:
-		writePath = outputPath / f'1-masked.data.json'
-		info(f'Exporting masked data to {writePath}')
-		with open(writePath, 'wt', encoding='utf-8') as stream:
-			json.dump(maskedData.ToDict(), stream, indent=4)
-
-		writePath = outputPath / f'1-differences.data.json'
+		writePath = outputPath / f'1-difference.data.json'
 		info(f'Exporting difference data to {writePath}')
 		with open(writePath, 'wt', encoding='utf-8') as stream:
 			json.dump(differenceData.ToDict(), stream, indent=4)
@@ -163,7 +158,7 @@ def Main():
 	failed: List[Tuple[str, str, str, List[Pattern]]] = []
 	succeeded = 0
 	cells = 0
-	for categoryName, category in maskedData.categories.items():
+	for categoryName, category in differenceData.categories.items():
 		for cellName, cell in category.cells.items():
 			for faultName, fault in cell.faults.items():
 				prefixes: Dict[LookupKey, Tuple[Assignment, int]] = {}
@@ -216,8 +211,9 @@ def Main():
 		exit(1)
 
 	info(f'------------------------ TRIMMING SIMULATIONS -----------------------')
-	trimmedData = _TrimSimulations(maskedData, goldenData, differenceData)
-	maskedData = None
+	trimmedData = _TrimSimulations(differenceData, goldenData)
+	goldenData = None
+	differenceData = None
 
 	if DebugOptions.ExportTrimmedSimulations in debugOptions:
 		writePath = outputPath / f'2-trimmed-simulations.data.json'
@@ -229,7 +225,7 @@ def Main():
 		return
 
 	info(f'------------------------ EVALUATING FAULT STATUSES -----------------------')
-	finalData, finalStatus = _ReduceAndEvaluateFaults(trimmedData, differenceData)
+	finalData, finalStatus = _ReduceAndEvaluateFaults(trimmedData)
 	trimmedData = None
 
 	info(f'------------------------ EXPORTING FAULT DATA -----------------------')
@@ -250,18 +246,11 @@ def Main():
 	info(f'------------------------ FINISHED -----------------------')
 
 
-def _ComputeDifferences(golden: SimulationData, faulty: SimulationCategory) -> Tuple[SimulationCategory, SimulationCategory]:
+def _ComputeDifferences(golden: SimulationData, faulty: SimulationCategory) -> SimulationCategory:
 	def _ToDiff(golden: str, faulty: str) -> str:
 		return ''.join([{
-			'00': '_', '01': 'D', '0X': 'X',
-			'10': 'D', '11': '_', '1X': 'X',
-			'X0': '_', 'X1': '_', 'XX': '_',
-		}.get(g + f) for g, f in zip(golden, faulty)])
-
-	def _ToMasked(golden: str, faulty: str) -> str:
-		return ''.join([{
-			'00': '0', '01': '1', '0X': 'X',
-			'10': '0', '11': '1', '1X': 'X',
+			'00': '0', '01': '^', '0X': 'x',
+			'10': 'v', '11': '1', '1X': '*',
 			'X0': 'X', 'X1': 'X', 'XX': 'X',
 		}.get(g + f) for g, f in zip(golden, faulty)])
 
@@ -275,8 +264,7 @@ def _ComputeDifferences(golden: SimulationData, faulty: SimulationCategory) -> T
 				outputs[output] += unknowns.get(prefix, {}).get(output, original[i])
 		return outputs
 
-	resultMasked = SimulationCategory()
-	resultDifferences = SimulationCategory()
+	result = SimulationCategory()
 	for cellName, goldenCell in golden.cells.items():
 		# Assume only one fault in golden model exists: Take the first fault
 		goldenRuns = next(iter(goldenCell.faults.values())).runs
@@ -296,24 +284,15 @@ def _ComputeDifferences(golden: SimulationData, faulty: SimulationCategory) -> T
 						unknownOutputs = { name: value for name, value in extractedOutputs.items() if value == 'X' }
 						unknownMasks[_ToLookupKey(trimmedInputs, trimmedClocks)].update(unknownOutputs)
 
-				maskedRuns: List[SimulationRun] = []
-				differenceRuns: List[SimulationRun] = []
+				runs: List[SimulationRun] = []
 				for faultyRun in fault.runs:
 					try:
 						goldenOutputs = goldenLookup[_ToLookupKey(faultyRun.inputs, faultyRun.clocks)]
 						faultyOutputs = _ApplyUnknowns(faultyRun, unknownMasks)
 
 						outputs = faultyRun.outputs.keys()
-						masked = { name: _ToMasked(goldenOutputs[name], faultyOutputs[name]) for name in outputs }
-						maskedRuns.append(SimulationRun(
-							jobId=faultyRun.jobId,
-							inputType=faultyRun.inputType,
-							inputs=faultyRun.inputs,
-							clocks=faultyRun.clocks,
-							outputs=masked
-						))
 						differences = { name: _ToDiff(goldenOutputs[name], faultyOutputs[name]) for name in outputs }
-						differenceRuns.append(SimulationRun(
+						runs.append(SimulationRun(
 							jobId=faultyRun.jobId,
 							inputType=faultyRun.inputType,
 							inputs=faultyRun.inputs,
@@ -324,12 +303,11 @@ def _ComputeDifferences(golden: SimulationData, faulty: SimulationCategory) -> T
 						raise ValueError(f'No corresponding simulation for inputs {faultyRun.inputs}' \
 					   		f' and clocks {faultyRun.clocks} was found') from error
 
-				resultMasked.SetFault(categoryName, cellName, faultName, SimulationFault(maskedRuns))
-				resultDifferences.SetFault(categoryName, cellName, faultName, SimulationFault(differenceRuns))
+				result.SetFault(categoryName, cellName, faultName, SimulationFault(runs))
 
-	return resultMasked, resultDifferences
+	return result
 
-def _TrimSimulations(faulty: SimulationCategory, golden: SimulationData, differences: SimulationCategory) -> SimulationCategory:
+def _TrimSimulations(faulty: SimulationCategory, golden: SimulationData) -> SimulationCategory:
 	result = SimulationCategory()
 	for categoryName, category in faulty.categories.items():
 		debug(f'Category {categoryName}')
@@ -347,8 +325,7 @@ def _TrimSimulations(faulty: SimulationCategory, golden: SimulationData, differe
 
 			# Trim, minimize and filter all the runs for each fault
 			for faultName, fault in cell.faults.items():
-				faultDifferences = differences.GetFault(categoryName, cellName, faultName).runs
-				trimmedRuns = _TrimRuns(fault.runs, faultDifferences)
+				trimmedRuns = _TrimRuns(fault.runs)
 				minimizedRuns = _MinimizeRuns(trimmedRuns, goldenLookup)
 				finalRuns = _RemovePrefixRuns(minimizedRuns)
 				result.SetFault(categoryName, cellName, faultName, SimulationFault(finalRuns))
@@ -368,80 +345,69 @@ def _TrimSimulations(faulty: SimulationCategory, golden: SimulationData, differe
 	return result
 
 
-def _TrimRuns(runs: List[SimulationRun], differences: List[SimulationRun]) -> List[SimulationRun]:
+def _TrimRuns(runs: List[SimulationRun]) -> List[SimulationRun]:
 	""" Trims simulation runs such that either the first difference, or the first don't care difference is reached.
 	Empty runs are removed after trimming.
 
 	Example results from multiple faults:
-	- I=0,  O=0  (DIFF=_)  -> I=,   O=  (empty and removed)
-	- I=1,  O=X  (DIFF=X)  -> I=1,  O=X
-	- I=0,  O=1  (DIFF=D)  -> I=0,  O=1
-	- I=01, O=01 (DIFF=__) -> I=,   O=  (empty and removed)
-	- I=01, O=X1 (DIFF=X_) -> I=0,  O=X
-	- I=01, O=11 (DIFF=D_) -> I=0,  O=1
-	- I=10, O=10 (DIFF=__) -> I=,   O=  (empty and removed)
-	- I=10, O=1X (DIFF=_X) -> I=10, O=1X
-	- I=10, O=11 (DIFF=_D) -> I=10, O=11
-	- I=10, O=0X (DIFF=DX) -> I=1,  O=0
-	- I=10, O=XX (DIFF=XX) -> I=1,  O=X
-	- I=10, O=11 (DIFF=XD) -> I=10, O=11
+	- I=0,  O=0  -> I=,   O=  (empty and removed)
+	- I=1,  O=*  -> I=1,  O=*
+	- I=0,  O=^  -> I=0,  O=^
+	- I=01, O=01 -> I=,   O=  (empty and removed)
+	- I=01, O=x1 -> I=0,  O=x
+	- I=01, O=^1 -> I=0,  O=^
+	- I=10, O=10 -> I=,   O=  (empty and removed)
+	- I=10, O=1x -> I=10, O=1x
+	- I=10, O=1^ -> I=10, O=1^
+	- I=10, O=vx -> I=1,  O=v
+	- I=10, O=*x -> I=1,  O=*
+	- I=10, O=1^ -> I=10, O=1^
 
 	>>> _TrimRuns([ \
-	        SimulationRun(jobId=1, inputType='static', inputs={'I': '0X'}, clocks={'C': 'PP'}, outputs={'O': 'X1'}), \
+	        SimulationRun(jobId=1, inputType='static', inputs={'I': '0X'}, clocks={'C': 'PP'}, outputs={'O': 'X^'}), \
 	        SimulationRun(jobId=2, inputType='static', inputs={'I': '1X'}, clocks={'C': 'PP'}, outputs={'O': 'X1'}), \
-	        SimulationRun(jobId=3, inputType='transition', inputs={'I': '01X'}, clocks={'C': 'PPP'}, outputs={'O': 'X11'}), \
-	        SimulationRun(jobId=4, inputType='transition', inputs={'I': '10X'}, clocks={'C': 'PPP'}, outputs={'O': 'X11'}), \
-	    ], [ \
-	        SimulationRun(jobId=1, inputType='static', inputs={'I': '0X'}, clocks={'C': 'PP'}, outputs={'O': '_D'}), \
-	        SimulationRun(jobId=2, inputType='static', inputs={'I': '1X'}, clocks={'C': 'PP'}, outputs={'O': '__'}), \
-	        SimulationRun(jobId=3, inputType='transition', inputs={'I': '01X'}, clocks={'C': 'PPP'}, outputs={'O': '_D_'}), \
-	        SimulationRun(jobId=4, inputType='transition', inputs={'I': '10X'}, clocks={'C': 'PPP'}, outputs={'O': '__D'}), \
+	        SimulationRun(jobId=3, inputType='transition', inputs={'I': '01X'}, clocks={'C': 'PPP'}, outputs={'O': 'X^1'}), \
+	        SimulationRun(jobId=4, inputType='transition', inputs={'I': '10X'}, clocks={'C': 'PPP'}, outputs={'O': 'X1^'}), \
 	    ])
 	... # doctest: +NORMALIZE_WHITESPACE
-	[job: 1, static inputs: I=0X, clocks: C=PP, outputs: O=X1, \
-	job: 3, transition inputs: I=01, clocks: C=PP, outputs: O=X1, \
-	job: 4, transition inputs: I=10X, clocks: C=PPP, outputs: O=X11]
+	[job: 1, static inputs: I=0X, clocks: C=PP, outputs: O=X^, \
+	job: 3, transition inputs: I=01, clocks: C=PP, outputs: O=X^, \
+	job: 4, transition inputs: I=10X, clocks: C=PPP, outputs: O=X1^]
 	>>> _TrimRuns([ \
-	        SimulationRun(jobId=1, inputType='static', inputs={'I': '0X'}, clocks={'C': 'PP'}, outputs={'O': 'X1'}), \
-	        SimulationRun(jobId=2, inputType='static', inputs={'I': '1X'}, clocks={'C': 'PP'}, outputs={'O': 'XX'}), \
-	        SimulationRun(jobId=3, inputType='transition', inputs={'I': '01X'}, clocks={'C': 'PPP'}, outputs={'O': 'X1X'}), \
-	        SimulationRun(jobId=4, inputType='transition', inputs={'I': '10X'}, clocks={'C': 'PPP'}, outputs={'O': 'XX1'}), \
-	    ], [ \
-	        SimulationRun(jobId=1, inputType='static', inputs={'I': '0X'}, clocks={'C': 'PP'}, outputs={'O': '_D'}), \
-	        SimulationRun(jobId=2, inputType='static', inputs={'I': '1X'}, clocks={'C': 'PP'}, outputs={'O': '_X'}), \
-	        SimulationRun(jobId=3, inputType='transition', inputs={'I': '01X'}, clocks={'C': 'PPP'}, outputs={'O': '_DX'}), \
-	        SimulationRun(jobId=4, inputType='transition', inputs={'I': '10X'}, clocks={'C': 'PPP'}, outputs={'O': '_XD'}), \
+	        SimulationRun(jobId=1, inputType='static', inputs={'I': '0X'}, clocks={'C': 'PP'}, outputs={'O': 'X^'}), \
+	        SimulationRun(jobId=2, inputType='static', inputs={'I': '1X'}, clocks={'C': 'PP'}, outputs={'O': 'X*'}), \
+	        SimulationRun(jobId=3, inputType='transition', inputs={'I': '01X'}, clocks={'C': 'PPP'}, outputs={'O': 'X^*'}), \
+	        SimulationRun(jobId=4, inputType='transition', inputs={'I': '10X'}, clocks={'C': 'PPP'}, outputs={'O': 'X*^'}), \
 	    ])
 	... # doctest: +NORMALIZE_WHITESPACE
-	[job: 1, static inputs: I=0X, clocks: C=PP, outputs: O=X1, \
-	job: 2, static inputs: I=1X, clocks: C=PP, outputs: O=XX, \
-	job: 3, transition inputs: I=01, clocks: C=PP, outputs: O=X1, \
-	job: 4, transition inputs: I=10X, clocks: C=PPP, outputs: O=XX1]
+	[job: 1, static inputs: I=0X, clocks: C=PP, outputs: O=X^, \
+	job: 2, static inputs: I=1X, clocks: C=PP, outputs: O=X*, \
+	job: 3, transition inputs: I=01, clocks: C=PP, outputs: O=X^, \
+	job: 4, transition inputs: I=10X, clocks: C=PPP, outputs: O=X*^]
 	"""
 	faultyLookup = {}
 	trimmedRuns: List[SimulationRun] = []
-	for runFaulty, runDifferences in zip(runs, differences):
-		inputLength = len(list(runFaulty.inputs.values())[0])
-		noMatch = inputLength + 1
+	for run in runs:
+		noMatch = _GetLength(run) + 1
 		newLength = noMatch
-		for outputName in runFaulty.outputs.keys():
-			for match in REGEX_PROPAGATION.finditer(runDifferences.outputs[outputName]):
+		for output in run.outputs.values():
+			for match in REGEX_PROPAGATION.finditer(output):
 				newLength = min(newLength, match.end())
 				break
 		if newLength == noMatch:
 			# Found no fault propagation => find general difference
 			newLength = noMatch
-			for outputName in runFaulty.outputs.keys():
-				for match in REGEX_DIFFERENCE.finditer(runDifferences.outputs[outputName]):
+			for output in run.outputs.values():
+				for match in REGEX_DIFFERENCE.finditer(output):
 					newLength = min(newLength, match.end())
 					break
 		if newLength == noMatch:
 			# Found neither propagation nor difference => remove
 			continue
 
-		trimmedInputs = _ExtractPrefix(runFaulty.inputs, newLength)
-		trimmedClocks = _ExtractPrefix(runFaulty.clocks, newLength)
-		trimmedOutputs = _ExtractPrefix(runFaulty.outputs, newLength)
+		trimmedInputs = _ExtractPrefix(run.inputs, newLength)
+		trimmedClocks = _ExtractPrefix(run.clocks, newLength)
+		trimmedOutputs = _ExtractPrefix(run.outputs, newLength)
 		for port, values in trimmedInputs.items():
 			assert len(values) == newLength, f"Input {port} with \"{values}\" doesn't have expected length of {newLength}"
 		for port, values in trimmedClocks.items():
@@ -455,8 +421,8 @@ def _TrimRuns(runs: List[SimulationRun], differences: List[SimulationRun]) -> Li
 
 		faultyLookup[_ToLookupKey(trimmedInputs, trimmedClocks)] = trimmedOutputs
 		trimmedRuns.append(SimulationRun(
-			jobId=runFaulty.jobId,
-			inputType=runFaulty.inputType,
+			jobId=run.jobId,
+			inputType=run.inputType,
 			inputs=trimmedInputs,
 			clocks=trimmedClocks,
 			outputs=trimmedOutputs
@@ -469,10 +435,10 @@ def _MinimizeRuns(runs: List[SimulationRun], goldenLookup: Dict[LookupKey, Dict[
 	""" Removes simulation runs that are subsumed by other simulation runs that are shorter or more generic.
 
 	Example results from multiple faults:
-	- I=1,  O=0  (DIFF=D)  subsumes         I=01,  O=00  (DIFF=_D ) using lookup 1
-	- I=1,  O=0  (DIFF=D)  does not subsume I=01,  O=X0  (DIFF=XD )
-	- I=01, O=00 (DIFF=_D) subsumes         I=001, O=0X0 (DIFF=_XD) using lookup 1
-	- I=0X, O=01 (DIFF=_D) subsumes         I=100, O=101 (DIFF=__D) using lookup 2
+	- I=1,  O=v  subsumes         I=01,  O=0v  using lookup 1
+	- I=1,  O=v  does not subsume I=01,  O=xv
+	- I=01, O=0^ subsumes         I=001, O=0x^ using lookup 1
+	- I=0X, O=0^ subsumes         I=100, O=10^ using lookup 2
 
 	With good lookup:
 	1) I=0, O=0
@@ -489,22 +455,22 @@ def _MinimizeRuns(runs: List[SimulationRun], goldenLookup: Dict[LookupKey, Dict[
 		    _ToLookupKey({'I': '10X'}, {'C': 'PPP'}): {'O': 'X10'}, \
 		}
 	>>> _MinimizeRuns([ \
-	        SimulationRun(jobId=1, inputType='static', inputs={'I': '0X'}, clocks={'C': 'PP'}, outputs={'O': 'X1'}), \
-	        SimulationRun(jobId=3, inputType='transition', inputs={'I': '01'}, clocks={'C': 'PP'}, outputs={'O': 'X1'}), \
-	        SimulationRun(jobId=4, inputType='transition', inputs={'I': '10X'}, clocks={'C': 'PPP'}, outputs={'O': 'X11'}), \
+	        SimulationRun(jobId=1, inputType='static', inputs={'I': '0X'}, clocks={'C': 'PP'}, outputs={'O': 'X^'}), \
+	        SimulationRun(jobId=3, inputType='transition', inputs={'I': '01'}, clocks={'C': 'PP'}, outputs={'O': 'X^'}), \
+	        SimulationRun(jobId=4, inputType='transition', inputs={'I': '10X'}, clocks={'C': 'PPP'}, outputs={'O': 'X1^'}), \
 	    ], lookup)
 	... # doctest: +NORMALIZE_WHITESPACE
 	... # Stuck-At fault should ideally be reduced to only a single static test
-	[job: 1, static inputs: I=0X, clocks: C=PP, outputs: O=X1]
+	[job: 1, static inputs: I=0X, clocks: C=PP, outputs: O=X^]
 	>>> _MinimizeRuns([ \
-	        SimulationRun(jobId=1, inputType='static', inputs={'I': '0X'}, clocks={'C': 'PP'}, outputs={'O': 'X1'}), \
-	        SimulationRun(jobId=2, inputType='static', inputs={'I': '1X'}, clocks={'C': 'PP'}, outputs={'O': 'XX'}), \
-	        SimulationRun(jobId=3, inputType='transition', inputs={'I': '01'}, clocks={'C': 'PP'}, outputs={'O': 'X1'}), \
-	        SimulationRun(jobId=4, inputType='transition', inputs={'I': '10X'}, clocks={'C': 'PPP'}, outputs={'O': 'XX1'}), \
+	        SimulationRun(jobId=1, inputType='static', inputs={'I': '0X'}, clocks={'C': 'PP'}, outputs={'O': 'X^'}), \
+	        SimulationRun(jobId=2, inputType='static', inputs={'I': '1X'}, clocks={'C': 'PP'}, outputs={'O': 'X*'}), \
+	        SimulationRun(jobId=3, inputType='transition', inputs={'I': '01'}, clocks={'C': 'PP'}, outputs={'O': 'X^'}), \
+	        SimulationRun(jobId=4, inputType='transition', inputs={'I': '10X'}, clocks={'C': 'PPP'}, outputs={'O': 'X*^'}), \
 	    ], lookup)
 	... # doctest: +NORMALIZE_WHITESPACE
-	[job: 1, static inputs: I=0X, clocks: C=PP, outputs: O=X1, \
-	job: 2, static inputs: I=1X, clocks: C=PP, outputs: O=XX]
+	[job: 1, static inputs: I=0X, clocks: C=PP, outputs: O=X^, \
+	job: 2, static inputs: I=1X, clocks: C=PP, outputs: O=X*]
 	"""
 	def _EqualUnderDontCares(current: Dict[str, str], other: Dict[str, str]):
 		""" Checks for equality while allowing the other inputs to have don't cares. """
@@ -585,7 +551,7 @@ def _RemovePrefixRuns(runs: List[SimulationRun]):
 	return result
 
 
-def _ReduceAndEvaluateFaults(data: SimulationCategory, differences: SimulationCategory):
+def _ReduceAndEvaluateFaults(data: SimulationCategory):
 	def _Equivalent(aRuns: List[SimulationRun], bRuns: List[SimulationRun]):
 		if len(aRuns) != len(bRuns):
 			return False
@@ -601,11 +567,9 @@ def _ReduceAndEvaluateFaults(data: SimulationCategory, differences: SimulationCa
 	for categoryName, category in data.categories.items():
 		for cellName, cell in category.cells.items():
 			for faultName, fault in cell.faults.items():
-				differenceRuns = differences.GetFault(categoryName, cellName, faultName).runs
-
 				differencePropagation = False
 				differenceUnknown = False
-				for run in differenceRuns:
+				for run in fault.runs:
 					for value in run.outputs.values():
 						if next(REGEX_PROPAGATION.finditer(value), None) is not None:
 							differencePropagation = True

@@ -62,7 +62,15 @@ def Main() -> None:
 						testType = 'transition'
 					elif length > 2:
 						testType = 'dynamic'
-					udfm.AddPattern(cellName, faultName, categoryName, testType, run.inputs, run.outputs)
+					outputs = {
+						outputName: output \
+							.replace('x', 'X') \
+							.replace('*', 'X') \
+							.replace('v', '0') \
+							.replace('^', '1')
+						for outputName, output in run.outputs.items()
+					}
+					udfm.AddPattern(cellName, faultName, categoryName, testType, run.inputs, outputs)
 
 	info(f'------------------------ EXPORTING UDFM -----------------------')
 	open_func = gzip.open if options.output_compress else open
